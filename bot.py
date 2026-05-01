@@ -3,7 +3,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = "8491405946:AAEtMZib67-yVqJ6yFsvDvSW0MGAiG2Zj0w"
+BOT_TOKEN = "8746636665:AAGG8-sKbexfpwqR1iDmtsh3hRrS2JyyWQ4"
 ADMIN_ID = 5575627219
 
 REFERRAL_REWARD = 5
