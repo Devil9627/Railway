@@ -2,8 +2,9 @@ import sqlite3
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+import os
 
-BOT_TOKEN = "8746636665:AAGG8-sKbexfpwqR1iDmtsh3hRrS2JyyWQ4"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 5575627219
 
 REFERRAL_REWARD = 5
