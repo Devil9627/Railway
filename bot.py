@@ -91,9 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("🚫 You are banned")
 
     await update.message.reply_text(
-        f"✨ Welcome, {u.first_name}!\n\n"
-        "Earn rewards by inviting friends.\n\n"
-        "Choose an option below 👇",
+        f"✨ Welcome, {u.first_name}!\n\nEarn rewards by inviting friends.\n\nChoose below 👇",
         reply_markup=menu(u.id)
     )
 
@@ -123,7 +121,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == "admin":
         await safe_edit(q, "👑 Admin Panel", InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Search", callback_data="search"),
+            [InlineKeyboardButton("🔍 Search User", callback_data="search"),
              InlineKeyboardButton("📤 Pending", callback_data="pending")],
             [InlineKeyboardButton("⬅ Back", callback_data="home")]
         ]))
@@ -133,7 +131,7 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "Enter user ID or username:")
 
     elif q.data == "pending":
-        r = supabase.table("withdrawals").select("*").eq("status","pending").execute()
+        r = supabase.table("withdrawals").select("*").eq("status", "pending").execute()
 
         if not r.data:
             return await safe_edit(q, "No pending withdrawals", back())
@@ -152,10 +150,14 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "approve":
         w = supabase.table("withdrawals").select("*").eq("id", state[uid]["wid"]).execute().data[0]
 
-        supabase.table("withdrawals").update({"status":"approved","processed_at":now()}).eq("id", w["id"]).execute()
-        add_tx(w["user_id"], w["amount"], "debit")
+        supabase.table("withdrawals").update({
+            "status": "approved",
+            "processed_at": now()
+        }).eq("id", w["id"]).execute()
 
+        add_tx(w["user_id"], w["amount"], "debit")
         await notify(context, w["user_id"], f"✅ Withdrawal Approved ₹{w['amount']}")
+
         await safe_edit(q, "Approved")
 
     elif q.data == "reject":
@@ -170,33 +172,45 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text
+    text = update.message.text.strip()
 
     if uid not in state:
         return
 
     s = state[uid]
 
+    # SEARCH USER (FIXED)
     if s["a"] == "search":
-        r = supabase.table("users").select("*").eq("id", int(text)).execute()
-        if not r.data:
-            return await update.message.reply_text("User not found")
 
-        u = r.data[0]
-        state[uid] = {"a":"edit","target":u["id"]}
+        try:
+            if text.isdigit():
+                r = supabase.table("users").select("*").eq("id", int(text)).execute()
+            else:
+                r = supabase.table("users").select("*").ilike("username", f"%{text}%").execute()
 
-        ban_btn = "✅ Unban" if u["is_banned"] else "🚫 Ban"
-        ban_cb = "unban" if u["is_banned"] else "ban"
+            if not r.data:
+                return await update.message.reply_text("User not found")
 
-        await update.message.reply_text(
-            f"👤 {u['username']}\n💰 ₹{u['balance']}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Credit", callback_data="credit"),
-                 InlineKeyboardButton("➖ Debit", callback_data="debit")],
-                [InlineKeyboardButton(ban_btn, callback_data=ban_cb)]
-            ])
-        )
+            u = r.data[0]
+            state[uid] = {"a":"edit","target":u["id"]}
 
+            ban_btn = "✅ Unban" if u["is_banned"] else "🚫 Ban"
+            ban_cb = "unban" if u["is_banned"] else "ban"
+
+            await update.message.reply_text(
+                f"👤 {u['username']}\n🆔 {u['id']}\n💰 ₹{u['balance']}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Credit", callback_data="credit"),
+                     InlineKeyboardButton("➖ Debit", callback_data="debit")],
+                    [InlineKeyboardButton(ban_btn, callback_data=ban_cb)]
+                ])
+            )
+
+        except Exception as e:
+            print("SEARCH ERROR:", e)
+            await update.message.reply_text("Error searching user")
+
+    # WITHDRAW
     elif s["a"] == "wd":
         user = get_user(uid)
 
@@ -236,6 +250,7 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             state.pop(uid)
 
+    # REJECT REASON
     elif s["a"] == "pending" and s.get("step") == "reason":
         w = supabase.table("withdrawals").select("*").eq("id", s["wid"]).execute().data[0]
 
@@ -253,6 +268,7 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state.pop(uid)
 
+    # EDIT USER
     elif s["a"] == "edit":
         target = s["target"]
 
@@ -275,6 +291,11 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Updated")
         state.pop(uid)
 
+# ---------- ERROR HANDLER ----------
+
+async def error_handler(update, context):
+    print("ERROR:", context.error)
+
 # ---------- RUN ----------
 
 app = Application.builder().token(BOT_TOKEN).build()
@@ -282,6 +303,7 @@ app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(cb))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg))
+app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", 8080))
 print("🚀 Running on", PORT)
