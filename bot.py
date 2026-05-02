@@ -266,6 +266,8 @@ app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", 8080))
 
+print("🚀 Bot starting on port:", PORT)
+
 app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
