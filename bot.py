@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from supabase import create_client
@@ -33,19 +34,30 @@ def get_referrals(uid):
 def update_balance(uid, amount):
     supabase.rpc("increment_balance", {"uid": uid, "amt": amount}).execute()
 
+def notify_user(context, uid, text):
+    try:
+        context.bot.send_message(chat_id=uid, text=text)
+    except:
+        pass
+
 # ================= UI =================
 
 def main_menu(uid):
     kb = [
-        [InlineKeyboardButton("💰 Balance", callback_data="balance")],
-        [InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")],
-        [InlineKeyboardButton("🎁 Refer", callback_data="refer")]
+        [
+            InlineKeyboardButton("💰 Balance", callback_data="balance"),
+            InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")
+        ],
+        [
+            InlineKeyboardButton("🎁 Refer", callback_data="refer"),
+            InlineKeyboardButton("👑 Admin", callback_data="admin")
+        ] if uid == ADMIN_ID else [
+            InlineKeyboardButton("🎁 Refer", callback_data="refer")
+        ]
     ]
-    if uid == ADMIN_ID:
-        kb.append([InlineKeyboardButton("👑 Admin", callback_data="admin")])
     return InlineKeyboardMarkup(kb)
 
-def back_btn():
+def back_home():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="home")]])
 
 # ================= START =================
@@ -54,27 +66,22 @@ async def start(update, context):
     u = update.effective_user
     uid = u.id
 
-    ref = int(context.args[0]) if context.args else None
-
     if not get_user(uid):
         supabase.table("users").insert({
             "id": uid,
             "username": u.username,
-            "balance": 0
+            "balance": 0,
+            "created_at": datetime.utcnow().isoformat()
         }).execute()
 
-        if ref and ref != uid:
-            exists = supabase.table("referrals").select("*").eq("invited_id", uid).execute()
-            if not exists.data:
-                supabase.table("referrals").insert({
-                    "inviter_id": ref,
-                    "invited_id": uid
-                }).execute()
+    name = u.first_name or "User"
 
-                reward = get_setting("referral_reward", 5)
-                update_balance(ref, reward)
-
-    await update.message.reply_text("🏠 Welcome", reply_markup=main_menu(uid))
+    await update.message.reply_text(
+        f"✨ Welcome, {name}!\n\n"
+        f"Earn rewards by inviting friends and completing tasks.\n\n"
+        f"Choose an option below 👇",
+        reply_markup=main_menu(uid)
+    )
 
 # ================= CALLBACK =================
 
@@ -86,20 +93,18 @@ async def callback(update, context):
     try:
         if q.data == "home":
             state.pop(uid, None)
-            await q.edit_message_text("🏠 Welcome", reply_markup=main_menu(uid))
+            await q.edit_message_text("🏠 Menu", reply_markup=main_menu(uid))
 
         elif q.data == "balance":
             u = get_user(uid)
-            ref_count = get_referrals(uid)
-            reward = get_setting("referral_reward", 5)
-            min_wd = get_setting("min_withdraw", 50)
+            refs = get_referrals(uid)
+            min_w = get_setting("min_withdraw", 50)
 
             await q.edit_message_text(
                 f"💰 Balance: ₹{u['balance']}\n"
-                f"👥 Referrals: {ref_count}\n"
-                f"🎁 Per Referral: ₹{reward}\n\n"
-                f"📊 Min Withdraw: ₹{min_wd}",
-                reply_markup=back_btn()
+                f"👥 Referrals: {refs}\n"
+                f"📊 Min Withdraw: ₹{min_w}",
+                reply_markup=back_home()
             )
 
         elif q.data == "refer":
@@ -108,30 +113,32 @@ async def callback(update, context):
             reward = get_setting("referral_reward", 5)
 
             await q.edit_message_text(
-                f"🎁 Your Referral Link:\n{link}\n\n"
+                f"🎁 Your referral link:\n{link}\n\n"
                 f"Earn ₹{reward} per referral",
-                reply_markup=back_btn()
+                reply_markup=back_home()
             )
 
         elif q.data == "withdraw":
             u = get_user(uid)
-            min_wd = get_setting("min_withdraw", 50)
+            min_w = get_setting("min_withdraw", 50)
 
             state[uid] = {"action": "withdraw", "step": "amount"}
 
             await q.edit_message_text(
                 f"💰 Balance: ₹{u['balance']}\n"
-                f"📊 Minimum: ₹{min_wd}\n\n"
-                f"✍️ Enter amount:",
-                reply_markup=back_btn()
+                f"📊 Minimum: ₹{min_w}\n\n"
+                f"Enter amount:",
+                reply_markup=back_home()
             )
 
         elif q.data == "admin":
             await q.edit_message_text(
                 "👑 Admin Panel",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔍 Search User", callback_data="search")],
-                    [InlineKeyboardButton("📤 Pending Withdrawals", callback_data="pending")],
+                    [
+                        InlineKeyboardButton("🔍 Search", callback_data="search"),
+                        InlineKeyboardButton("📤 Pending", callback_data="pending")
+                    ],
                     [InlineKeyboardButton("⬅ Back", callback_data="home")]
                 ])
             )
@@ -140,31 +147,47 @@ async def callback(update, context):
             state[uid] = {"action": "search"}
             await q.edit_message_text("Enter user ID or username:")
 
-        elif q.data == "confirm_withdraw":
-            s = state[uid]
+        elif q.data.startswith("credit_"):
+            target = int(q.data.split("_")[1])
+            state[uid] = {"action": "credit", "target": target}
+            await q.edit_message_text("Enter amount to CREDIT:")
 
-            wid = str(uuid.uuid4())[:8]
+        elif q.data.startswith("debit_"):
+            target = int(q.data.split("_")[1])
+            state[uid] = {"action": "debit", "target": target}
+            await q.edit_message_text("Enter amount to DEBIT:")
 
-            supabase.table("withdrawals").insert({
-                "withdraw_id": wid,
-                "user_id": uid,
-                "upi_id": s["upi"],
-                "amount": s["amount"],
-                "status": "pending"
-            }).execute()
+        elif q.data == "pending":
+            r = supabase.table("withdrawals").select("*").eq("status", "pending").execute()
 
-            update_balance(uid, -s["amount"])
+            if not r.data:
+                return await q.edit_message_text("No pending requests", reply_markup=back_home())
 
-            state.pop(uid)
+            w = r.data[0]
 
             await q.edit_message_text(
-                f"✅ Withdrawal Submitted!\nID: {wid}",
-                reply_markup=back_btn()
+                f"ID: {w['withdraw_id']}\n"
+                f"User: {w['user_id']}\n"
+                f"Amount: ₹{w['amount']}\n"
+                f"UPI: {w['upi_id']}",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"approve_{w['id']}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"reject_{w['id']}")
+                    ],
+                    [InlineKeyboardButton("⬅ Back", callback_data="admin")]
+                ])
             )
 
-        elif q.data == "cancel":
-            state.pop(uid, None)
-            await q.edit_message_text("❌ Cancelled", reply_markup=main_menu(uid))
+        elif q.data.startswith("approve_"):
+            wid = int(q.data.split("_")[1])
+            supabase.table("withdrawals").update({"status": "approved"}).eq("id", wid).execute()
+            await q.edit_message_text("✅ Approved")
+
+        elif q.data.startswith("reject_"):
+            wid = int(q.data.split("_")[1])
+            supabase.table("withdrawals").update({"status": "rejected"}).eq("id", wid).execute()
+            await q.edit_message_text("❌ Rejected")
 
     except:
         pass
@@ -180,67 +203,92 @@ async def message(update, context):
 
     s = state[uid]
 
-    # ===== WITHDRAW =====
     if s["action"] == "withdraw":
 
         if s["step"] == "amount":
             if not text.isdigit():
-                return await update.message.reply_text("❌ Enter valid number")
+                return await update.message.reply_text("Invalid amount")
 
-            amount = int(text)
+            amt = int(text)
             u = get_user(uid)
-            min_wd = get_setting("min_withdraw", 50)
+            min_w = get_setting("min_withdraw", 50)
 
-            if amount < min_wd:
-                return await update.message.reply_text(f"❌ Minimum is ₹{min_wd}")
+            if amt < min_w:
+                return await update.message.reply_text(f"Minimum is ₹{min_w}")
+            if amt > u["balance"]:
+                return await update.message.reply_text("Insufficient balance")
 
-            if amount > u["balance"]:
-                return await update.message.reply_text("❌ Insufficient balance")
-
-            s["amount"] = amount
+            s["amount"] = amt
             s["step"] = "upi"
 
-            await update.message.reply_text("🏦 Enter UPI ID (name@bank):")
+            await update.message.reply_text("Enter UPI (name@bank):")
 
         elif s["step"] == "upi":
             if not re.match(r"^[\w.-]+@[\w.-]+$", text):
-                return await update.message.reply_text("❌ Invalid UPI format")
+                return await update.message.reply_text("Invalid UPI")
 
-            s["upi"] = text
+            wid = str(uuid.uuid4())[:8]
 
-            await update.message.reply_text(
-                f"📦 Confirm Withdrawal\n\n"
-                f"💰 Amount: ₹{s['amount']}\n"
-                f"🏦 UPI: {text}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Confirm", callback_data="confirm_withdraw")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ])
-            )
+            supabase.table("withdrawals").insert({
+                "withdraw_id": wid,
+                "user_id": uid,
+                "upi_id": text,
+                "amount": s["amount"],
+                "status": "pending"
+            }).execute()
 
-    # ===== ADMIN SEARCH =====
+            update_balance(uid, -s["amount"])
+
+            notify_user(context, ADMIN_ID, f"New withdrawal ₹{s['amount']} from {uid}")
+
+            state.pop(uid)
+
+            await update.message.reply_text("✅ Request submitted")
+
     elif s["action"] == "search":
-        query = text.replace("@", "")
+        q = text.replace("@", "")
 
-        if query.isdigit():
-            r = supabase.table("users").select("*").eq("id", int(query)).execute()
+        if q.isdigit():
+            r = supabase.table("users").select("*").eq("id", int(q)).execute()
         else:
-            r = supabase.table("users").select("*").ilike("username", f"%{query}%").execute()
+            r = supabase.table("users").select("*").ilike("username", f"%{q}%").execute()
 
         if not r.data:
-            return await update.message.reply_text("❌ User not found")
+            return await update.message.reply_text("User not found")
 
         u = r.data[0]
 
-        state.pop(uid)
-
         await update.message.reply_text(
             f"👤 {u.get('username')}\n"
-            f"💰 Balance: ₹{u['balance']}",
+            f"🆔 {u['id']}\n"
+            f"💰 ₹{u['balance']}",
             reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➕ Credit", callback_data=f"credit_{u['id']}"),
+                    InlineKeyboardButton("➖ Debit", callback_data=f"debit_{u['id']}")
+                ],
                 [InlineKeyboardButton("⬅ Back", callback_data="admin")]
             ])
         )
+
+        state.pop(uid)
+
+    elif s["action"] in ["credit", "debit"]:
+        if not text.isdigit():
+            return
+
+        amt = int(text)
+        target = s["target"]
+
+        if s["action"] == "credit":
+            update_balance(target, amt)
+            notify_user(context, target, f"💰 Credited ₹{amt}")
+        else:
+            update_balance(target, -amt)
+            notify_user(context, target, f"💸 Debited ₹{amt}")
+
+        state.pop(uid)
+        await update.message.reply_text("✅ Done")
 
 # ================= RUN =================
 
