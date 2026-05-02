@@ -47,6 +47,15 @@ async def notify(context, uid, text):
     except:
         pass
 
+# ---------- SAFE EDIT ----------
+
+async def safe_edit(q, text, markup=None):
+    try:
+        await q.edit_message_text(text, reply_markup=markup)
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            print("EDIT ERROR:", e)
+
 # ---------- UI ----------
 
 def menu(uid):
@@ -97,73 +106,65 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "home":
         state.pop(uid, None)
-        await q.edit_message_text("🏠 Menu", reply_markup=menu(uid))
+        await safe_edit(q, "🏠 Menu", menu(uid))
 
     elif q.data == "bal":
         u = get_user(uid)
-        await q.edit_message_text(f"💰 Balance: ₹{u['balance']}", reply_markup=back())
+        await safe_edit(q, f"💰 Balance: ₹{u['balance']}", back())
 
     elif q.data == "wd":
-        user = get_user(uid)
-        if user["is_banned"]:
-            return await q.edit_message_text("🚫 You are banned")
-
         state[uid] = {"a": "wd", "step": "amt"}
-        await q.edit_message_text("Enter withdrawal amount (Min ₹50):", reply_markup=back())
+        await safe_edit(q, "Enter withdrawal amount (Min ₹50):", back())
+
+    elif q.data == "ref":
+        bot_username = (await context.bot.get_me()).username
+        link = f"https://t.me/{bot_username}?start={uid}"
+        await safe_edit(q, f"🎁 Your Referral Link:\n\n{link}", back())
 
     elif q.data == "admin":
-        await q.edit_message_text(
-            "👑 Admin Panel",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔍 Search User", callback_data="search"),
-                 InlineKeyboardButton("📤 Pending", callback_data="pending")],
-                [InlineKeyboardButton("⬅ Back", callback_data="home")]
-            ])
-        )
+        await safe_edit(q, "👑 Admin Panel", InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Search", callback_data="search"),
+             InlineKeyboardButton("📤 Pending", callback_data="pending")],
+            [InlineKeyboardButton("⬅ Back", callback_data="home")]
+        ]))
 
     elif q.data == "search":
         state[uid] = {"a": "search"}
-        await q.edit_message_text("Enter user ID or username:")
+        await safe_edit(q, "Enter user ID or username:")
 
     elif q.data == "pending":
-        r = supabase.table("withdrawals").select("*").eq("status", "pending").execute()
+        r = supabase.table("withdrawals").select("*").eq("status","pending").execute()
 
         if not r.data:
-            return await q.edit_message_text("No pending withdrawals", reply_markup=back())
+            return await safe_edit(q, "No pending withdrawals", back())
 
         w = r.data[0]
         state[uid] = {"a": "pending", "wid": w["id"]}
 
-        await q.edit_message_text(
+        await safe_edit(q,
             f"👤 {w['user_id']}\n💰 ₹{w['amount']}\n🏦 {w['upi_id']}",
-            reply_markup=InlineKeyboardMarkup([
+            InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                 InlineKeyboardButton("❌ Reject", callback_data="reject")],
-                [InlineKeyboardButton("⏭ Next", callback_data="pending")]
+                 InlineKeyboardButton("❌ Reject", callback_data="reject")]
             ])
         )
 
     elif q.data == "approve":
-        wid = state[uid]["wid"]
-        w = supabase.table("withdrawals").select("*").eq("id", wid).execute().data[0]
+        w = supabase.table("withdrawals").select("*").eq("id", state[uid]["wid"]).execute().data[0]
 
-        supabase.table("withdrawals").update({
-            "status": "approved",
-            "processed_at": now()
-        }).eq("id", wid).execute()
-
+        supabase.table("withdrawals").update({"status":"approved","processed_at":now()}).eq("id", w["id"]).execute()
         add_tx(w["user_id"], w["amount"], "debit")
 
-        await notify(context, w["user_id"], f"✅ Withdrawal Approved\n₹{w['amount']}")
-        await q.edit_message_text("Approved")
+        await notify(context, w["user_id"], f"✅ Withdrawal Approved ₹{w['amount']}")
+        await safe_edit(q, "Approved")
 
     elif q.data == "reject":
         state[uid]["step"] = "reason"
-        await q.edit_message_text("Enter rejection reason:")
+        await safe_edit(q, "Enter rejection reason:")
 
-    elif q.data in ["credit", "debit", "ban", "unban"]:
+    elif q.data in ["credit","debit","ban","unban"]:
         state[uid]["step"] = q.data
-        await q.edit_message_text("Enter amount:" if q.data in ["credit", "debit"] else "Processing...")
+        await safe_edit(q, "Enter amount:" if q.data in ["credit","debit"] else "Processing...")
 
 # ---------- MESSAGE ----------
 
@@ -177,22 +178,18 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = state[uid]
 
     if s["a"] == "search":
-        if text.isdigit():
-            r = supabase.table("users").select("*").eq("id", int(text)).execute()
-        else:
-            r = supabase.table("users").select("*").ilike("username", f"%{text}%").execute()
-
+        r = supabase.table("users").select("*").eq("id", int(text)).execute()
         if not r.data:
             return await update.message.reply_text("User not found")
 
         u = r.data[0]
-        state[uid] = {"a": "edit", "target": u["id"], "banned": u["is_banned"]}
+        state[uid] = {"a":"edit","target":u["id"]}
 
         ban_btn = "✅ Unban" if u["is_banned"] else "🚫 Ban"
         ban_cb = "unban" if u["is_banned"] else "ban"
 
         await update.message.reply_text(
-            f"👤 {u['username']}\n💰 Balance: ₹{u['balance']}\n🚫 Status: {'Banned' if u['is_banned'] else 'Active'}",
+            f"👤 {u['username']}\n💰 ₹{u['balance']}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Credit", callback_data="credit"),
                  InlineKeyboardButton("➖ Debit", callback_data="debit")],
@@ -200,62 +197,30 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-    elif s["a"] == "edit":
-        target = s["target"]
-
-        if s.get("step") == "credit":
-            amt = int(text)
-            update_balance(target, amt)
-            add_tx(target, amt, "admin_credit")
-            await notify(context, target, f"💰 ₹{amt} credited")
-
-        elif s.get("step") == "debit":
-            amt = int(text)
-            update_balance(target, -amt)
-            add_tx(target, amt, "admin_debit")
-            await notify(context, target, f"💸 ₹{amt} debited")
-
-        elif s.get("step") == "ban":
-            supabase.table("users").update({"is_banned": True}).eq("id", target).execute()
-            await notify(context, target, "🚫 You are banned")
-
-        elif s.get("step") == "unban":
-            supabase.table("users").update({"is_banned": False}).eq("id", target).execute()
-            await notify(context, target, "✅ You are unbanned")
-
-        await update.message.reply_text("Updated")
-        state.pop(uid)
-
     elif s["a"] == "wd":
         user = get_user(uid)
 
         if s["step"] == "amt":
             if not text.isdigit():
-                return await update.message.reply_text("❌ Enter valid number")
+                return await update.message.reply_text("Invalid amount")
 
             amt = int(text)
 
-            if amt <= 0:
-                return await update.message.reply_text("❌ Amount must be greater than 0")
-
             if amt > user["balance"]:
-                return await update.message.reply_text(f"❌ Insufficient balance\n💰 Balance: ₹{user['balance']}")
+                return await update.message.reply_text("Insufficient balance")
 
             if amt < 50:
-                return await update.message.reply_text("❌ Minimum withdraw ₹50")
+                return await update.message.reply_text("Minimum ₹50")
 
             s["amt"] = amt
             s["step"] = "upi"
-
-            await update.message.reply_text("💳 Enter UPI ID\nExample: name@bank")
+            await update.message.reply_text("Enter UPI (name@bank)")
 
         elif s["step"] == "upi":
             if not re.match(r"^[\w.\-]{2,}@[a-zA-Z]{2,}$", text):
-                return await update.message.reply_text("❌ Invalid UPI\nExample: yourname@bank")
+                return await update.message.reply_text("Invalid UPI")
 
-            success = update_balance(uid, -s["amt"])
-            if not success:
-                return await update.message.reply_text("❌ Try again later")
+            update_balance(uid, -s["amt"])
 
             supabase.table("withdrawals").insert({
                 "withdraw_id": str(uuid.uuid4())[:8],
@@ -267,32 +232,48 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }).execute()
 
             await notify(context, ADMIN_ID, f"📤 New Withdrawal ₹{s['amt']}")
-            await update.message.reply_text("✅ Request submitted")
+            await update.message.reply_text("Request submitted")
 
             state.pop(uid)
 
     elif s["a"] == "pending" and s.get("step") == "reason":
-        wid = s["wid"]
-        w = supabase.table("withdrawals").select("*").eq("id", wid).execute().data[0]
+        w = supabase.table("withdrawals").select("*").eq("id", s["wid"]).execute().data[0]
 
         supabase.table("withdrawals").update({
-            "status": "rejected",
+            "status":"rejected",
             "note": text,
             "processed_at": now()
-        }).eq("id", wid).execute()
+        }).eq("id", w["id"]).execute()
 
         update_balance(w["user_id"], w["amount"])
         add_tx(w["user_id"], w["amount"], "credit")
 
-        await notify(context, w["user_id"], f"❌ Withdrawal Rejected\nReason: {text}")
+        await notify(context, w["user_id"], f"❌ Rejected: {text}")
         await update.message.reply_text("Rejected")
 
         state.pop(uid)
 
-# ---------- ERROR HANDLER ----------
+    elif s["a"] == "edit":
+        target = s["target"]
 
-async def error_handler(update, context):
-    print("ERROR:", context.error)
+        if s["step"] == "credit":
+            amt = int(text)
+            update_balance(target, amt)
+            add_tx(target, amt, "admin_credit")
+
+        elif s["step"] == "debit":
+            amt = int(text)
+            update_balance(target, -amt)
+            add_tx(target, amt, "admin_debit")
+
+        elif s["step"] == "ban":
+            supabase.table("users").update({"is_banned":True}).eq("id", target).execute()
+
+        elif s["step"] == "unban":
+            supabase.table("users").update({"is_banned":False}).eq("id", target).execute()
+
+        await update.message.reply_text("Updated")
+        state.pop(uid)
 
 # ---------- RUN ----------
 
@@ -301,11 +282,9 @@ app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(cb))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg))
-app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", 8080))
-
-print("🚀 Bot running on port", PORT)
+print("🚀 Running on", PORT)
 
 app.run_webhook(
     listen="0.0.0.0",
