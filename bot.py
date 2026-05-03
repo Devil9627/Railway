@@ -177,10 +177,6 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state[uid]["step"] = "reason"
         await safe_edit(q, "Enter rejection reason:")
 
-    elif q.data in ["credit","debit","ban","unban"]:
-        state[uid]["step"] = q.data
-        await safe_edit(q, "Enter amount:" if q.data in ["credit","debit"] else "Processing...")
-
 # ---------- MESSAGE ----------
 
 async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,39 +271,12 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state.pop(uid)
 
-    elif s["a"] == "edit":
-        target = s["target"]
-
-        if s["step"] == "credit":
-            amt = int(text)
-            update_balance(target, amt)
-            add_tx(target, amt, "admin_credit")
-
-        elif s["step"] == "debit":
-            amt = int(text)
-            update_balance(target, -amt)
-            add_tx(target, amt, "admin_debit")
-
-        elif s["step"] == "ban":
-            supabase.table("users").update({"is_banned":True}).eq("id", target).execute()
-
-        elif s["step"] == "unban":
-            supabase.table("users").update({"is_banned":False}).eq("id", target).execute()
-
-        await update.message.reply_text("Updated")
-        state.pop(uid)
-
-# ---------- ERROR HANDLER ----------
+# ---------- ERROR ----------
 
 async def error_handler(update, context):
     print("ERROR:", context.error)
 
 # ---------- RUN ----------
-
-async def set_webhook(app):
-    url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    await app.bot.set_webhook(url)
-    print("Webhook set:", url)
 
 app = Application.builder().token(BOT_TOKEN).build()
 
@@ -315,8 +284,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(cb))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg))
 app.add_error_handler(error_handler)
-
-app.post_init = set_webhook
 
 PORT = int(os.getenv("PORT", 8080))
 
