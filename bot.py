@@ -47,8 +47,6 @@ async def notify(context, uid, text):
     except:
         pass
 
-# ---------- SAFE EDIT ----------
-
 async def safe_edit(q, text, markup=None):
     try:
         await q.edit_message_text(text, reply_markup=markup)
@@ -86,12 +84,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "created_at": now()
         }).execute()
 
-    user = get_user(u.id)
-    if user and user["is_banned"]:
-        return await update.message.reply_text("🚫 You are banned")
-
     await update.message.reply_text(
-        f"✨ Welcome, {u.first_name}!\n\nEarn rewards by inviting friends.\n\nChoose below 👇",
+        f"✨ Welcome, {u.first_name}!\n\n"
+        "💸 Earn money by referring friends\n"
+        "📈 Track your balance & withdrawals\n\n"
+        "Choose an option below 👇",
         reply_markup=menu(u.id)
     )
 
@@ -110,28 +107,45 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_user(uid)
         await safe_edit(q, f"💰 Balance: ₹{u['balance']}", back())
 
+    elif q.data == "ref":
+        bot = await context.bot.get_me()
+        link = f"https://t.me/{bot.username}?start={uid}"
+        await safe_edit(q, f"🎁 Your Referral Link:\n\n{link}", back())
+
+    elif q.data == "his":
+        w = supabase.table("withdrawals").select("*").eq("user_id", uid).order("requested_at", desc=True).limit(5).execute()
+
+        if not w.data:
+            return await safe_edit(q, "📜 No withdrawal history", back())
+
+        text = "📜 Withdrawal History:\n\n"
+
+        for i in w.data:
+            status = "✅" if i["status"]=="approved" else "❌" if i["status"]=="rejected" else "⏳"
+            text += f"{status} ₹{i['amount']}\n🏦 {i['upi_id']}\n📌 {i['status']}\n"
+            if i.get("note"):
+                text += f"📝 {i['note']}\n"
+            text += "\n"
+
+        await safe_edit(q, text, back())
+
     elif q.data == "wd":
         state[uid] = {"a": "wd", "step": "amt"}
-        await safe_edit(q, "Enter withdrawal amount (Min ₹50):", back())
-
-    elif q.data == "ref":
-        bot_username = (await context.bot.get_me()).username
-        link = f"https://t.me/{bot_username}?start={uid}"
-        await safe_edit(q, f"🎁 Your Referral Link:\n\n{link}", back())
+        await safe_edit(q, "Enter amount (Min ₹50):", back())
 
     elif q.data == "admin":
         await safe_edit(q, "👑 Admin Panel", InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Search User", callback_data="search"),
+            [InlineKeyboardButton("🔍 Search", callback_data="search"),
              InlineKeyboardButton("📤 Pending", callback_data="pending")],
             [InlineKeyboardButton("⬅ Back", callback_data="home")]
         ]))
 
     elif q.data == "search":
         state[uid] = {"a": "search"}
-        await safe_edit(q, "Enter user ID or username:")
+        await safe_edit(q, "Enter ID or username:")
 
     elif q.data == "pending":
-        r = supabase.table("withdrawals").select("*").eq("status", "pending").execute()
+        r = supabase.table("withdrawals").select("*").eq("status","pending").execute()
 
         if not r.data:
             return await safe_edit(q, "No pending withdrawals", back())
@@ -151,13 +165,12 @@ async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w = supabase.table("withdrawals").select("*").eq("id", state[uid]["wid"]).execute().data[0]
 
         supabase.table("withdrawals").update({
-            "status": "approved",
+            "status":"approved",
             "processed_at": now()
         }).eq("id", w["id"]).execute()
 
         add_tx(w["user_id"], w["amount"], "debit")
         await notify(context, w["user_id"], f"✅ Withdrawal Approved ₹{w['amount']}")
-
         await safe_edit(q, "Approved")
 
     elif q.data == "reject":
@@ -179,38 +192,28 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     s = state[uid]
 
-    # SEARCH USER (FIXED)
     if s["a"] == "search":
+        if text.isdigit():
+            r = supabase.table("users").select("*").eq("id", int(text)).execute()
+        else:
+            r = supabase.table("users").select("*").ilike("username", f"%{text}%").execute()
 
-        try:
-            if text.isdigit():
-                r = supabase.table("users").select("*").eq("id", int(text)).execute()
-            else:
-                r = supabase.table("users").select("*").ilike("username", f"%{text}%").execute()
+        if not r.data:
+            return await update.message.reply_text("User not found")
 
-            if not r.data:
-                return await update.message.reply_text("User not found")
+        u = r.data[0]
+        state[uid] = {"a":"edit","target":u["id"]}
 
-            u = r.data[0]
-            state[uid] = {"a":"edit","target":u["id"]}
+        await update.message.reply_text(
+            f"👤 @{u.get('username','N/A')}\n🆔 {u['id']}\n💰 ₹{u['balance']}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Credit", callback_data="credit"),
+                 InlineKeyboardButton("➖ Debit", callback_data="debit")],
+                [InlineKeyboardButton("🚫 Ban" if not u["is_banned"] else "✅ Unban",
+                                      callback_data="ban" if not u["is_banned"] else "unban")]
+            ])
+        )
 
-            ban_btn = "✅ Unban" if u["is_banned"] else "🚫 Ban"
-            ban_cb = "unban" if u["is_banned"] else "ban"
-
-            await update.message.reply_text(
-                f"👤 {u['username']}\n🆔 {u['id']}\n💰 ₹{u['balance']}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Credit", callback_data="credit"),
-                     InlineKeyboardButton("➖ Debit", callback_data="debit")],
-                    [InlineKeyboardButton(ban_btn, callback_data=ban_cb)]
-                ])
-            )
-
-        except Exception as e:
-            print("SEARCH ERROR:", e)
-            await update.message.reply_text("Error searching user")
-
-    # WITHDRAW
     elif s["a"] == "wd":
         user = get_user(uid)
 
@@ -228,7 +231,12 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             s["amt"] = amt
             s["step"] = "upi"
-            await update.message.reply_text("Enter UPI (name@bank)")
+
+            await update.message.reply_text(
+                f"📦 Confirm Withdrawal\n\n"
+                f"💰 Amount: ₹{amt}\n\n"
+                "Enter your UPI ID (name@bank)"
+            )
 
         elif s["step"] == "upi":
             if not re.match(r"^[\w.\-]{2,}@[a-zA-Z]{2,}$", text):
@@ -246,11 +254,10 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }).execute()
 
             await notify(context, ADMIN_ID, f"📤 New Withdrawal ₹{s['amt']}")
-            await update.message.reply_text("Request submitted")
+            await update.message.reply_text("✅ Request submitted")
 
             state.pop(uid)
 
-    # REJECT REASON
     elif s["a"] == "pending" and s.get("step") == "reason":
         w = supabase.table("withdrawals").select("*").eq("id", s["wid"]).execute().data[0]
 
@@ -268,7 +275,6 @@ async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state.pop(uid)
 
-    # EDIT USER
     elif s["a"] == "edit":
         target = s["target"]
 
@@ -298,6 +304,11 @@ async def error_handler(update, context):
 
 # ---------- RUN ----------
 
+async def set_webhook(app):
+    url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    await app.bot.set_webhook(url)
+    print("Webhook set:", url)
+
 app = Application.builder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
@@ -305,8 +316,9 @@ app.add_handler(CallbackQueryHandler(cb))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg))
 app.add_error_handler(error_handler)
 
+app.post_init = set_webhook
+
 PORT = int(os.getenv("PORT", 8080))
-print("🚀 Running on", PORT)
 
 app.run_webhook(
     listen="0.0.0.0",
